@@ -173,6 +173,10 @@ body {
   display: none !important;
 }
 
+.layout.view-home .controls .controls-block:first-child {
+  display: none;
+}
+
 .topbar {
   background: linear-gradient(180deg, #ffffff, #f8fcff);
   border: 1px solid #dce8ef;
