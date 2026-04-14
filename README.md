@@ -35,3 +35,28 @@ Die Daten kommen live aus OpenStreetMap über die Overpass API.
 - `index.html` - Struktur der Seite
 - `styles.css` - Layout und Design
 - `app.js` - Karte, Filter und API-Abfrage
+- `server.js` - API, Crowd-Logik und Agent-Verknüpfung
+
+## Agenten verknüpfen (Sportplätze + Planer)
+
+Neue Endpunkte im Backend:
+
+- `POST /api/agents/sports-places` - lädt Sportplätze in Innsbruck (Overpass, mit Fallback)
+- `POST /api/agents/planner` - erstellt einen Plan aus einer übergebenen Platzliste
+- `POST /api/agents/compose-plan` - orchestriert beide Agenten in einem Call (Event-Pattern)
+
+Beispiel:
+
+```bash
+curl -X POST http://localhost:8080/api/agents/compose-plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sports": ["tennis", "soccer"],
+    "limit": 5,
+    "options": {
+      "startHour": "18:30",
+      "maxStops": 2,
+      "travelMode": "Fahrrad"
+    }
+  }'
+```

@@ -18,29 +18,49 @@
         <div class="brand">
           <img src="./logo-crowdcourt.svg" alt="CrowdCourt Logo" class="brand-logo" />
           <div>
-            <h1>Choose a location</h1>
-            <p>See what's available around Innsbruck</p>
+            <h1>CrowdCourt Innsbruck</h1>
+            <p>Finde Sportplätze und starte direkt deine Route</p>
           </div>
         </div>
         <button class="close-btn" type="button" aria-label="Schließen">✕</button>
       </header>
 
       <section class="controls">
-        <button class="filter-btn" data-sport="soccer">⚽ Fußball</button>
-        <button class="filter-btn" data-sport="tennis">🎾 Tennis</button>
-        <button class="filter-btn" data-sport="volleyball">🏐 Volleyball</button>
-        <button class="filter-btn" data-sport="table_tennis">🏓 Tischtennis</button>
-        <button id="clear-filters-btn" class="secondary" type="button">Filter zurücksetzen</button>
-        <button id="locate-btn" class="secondary">Standort nutzen</button>
-        <button id="reload-btn" class="secondary">Neu laden</button>
-        <button id="fresh-load-btn" class="secondary">Frisch laden</button>
+        <div class="controls-block">
+          <span class="controls-label">Sportarten</span>
+          <div class="controls-row">
+            <button class="filter-btn" data-sport="soccer">⚽ Fußball</button>
+            <button class="filter-btn" data-sport="tennis">🎾 Tennis</button>
+            <button class="filter-btn" data-sport="volleyball">🏐 Volleyball</button>
+            <button class="filter-btn" data-sport="table_tennis">🏓 Tischtennis</button>
+          </div>
+        </div>
+        <div class="controls-block">
+          <span class="controls-label">Aktionen</span>
+          <div class="controls-row controls-row-actions">
+            <button id="clear-filters-btn" class="secondary" type="button">Filter zurücksetzen</button>
+            <button id="locate-btn" class="secondary" type="button">Standort nutzen</button>
+            <button id="reload-btn" class="secondary" type="button">Neu laden</button>
+            <button id="fresh-load-btn" class="secondary" type="button">Frisch laden</button>
+          </div>
+        </div>
+        <div class="controls-block">
+          <span class="controls-label">Live-Belegung</span>
+          <label class="presence-optin">
+            <input id="presence-optin-toggle" type="checkbox" />
+            <span>Live-Belegung verbessern (Auto-Presence)</span>
+          </label>
+          <p class="presence-hint">
+            Bei Aktivierung werden Spot-ID, grobe Position und Zeitpunkt waehrend geoeffneter App gesendet.
+          </p>
+        </div>
       </section>
 
       <section class="search-row">
         <input
           id="search-input"
           type="search"
-          placeholder="Search for a court or sport"
+          placeholder="Suche nach Sportplatz oder Sportart"
           aria-label="Sportplätze durchsuchen"
         />
       </section>
@@ -74,8 +94,20 @@
         </div>
       </section>
 
-      <section class="content">
+      <section id="home-hub" class="home-hub">
+        <h2>Start</h2>
+        <p>Wähle zuerst deine Sportarten und öffne dann Karte oder Favoriten.</p>
+        <div class="home-actions">
+          <button class="secondary" type="button" data-home-action="map">Zur Karte</button>
+          <button class="secondary" type="button" data-home-action="favorites">Zu Favoriten</button>
+        </div>
+      </section>
+
+      <section class="map-stage">
         <div id="map" aria-label="Karte mit Sportplätzen"></div>
+      </section>
+
+      <section class="content" hidden>
         <aside class="list-panel">
           <div class="panel-head">
             <h2 id="panel-title">Spots in deiner Nähe</h2>
@@ -87,9 +119,9 @@
       </section>
 
       <nav class="bottom-nav" aria-label="Ansichten">
-        <button class="nav-btn active" data-view="map">🗺️ Map</button>
+        <button class="nav-btn active" data-view="home">🏠 Home</button>
+        <button class="nav-btn" data-view="map">🗺️ Karte</button>
         <button class="nav-btn" data-view="favorites">💙 Favoriten</button>
-        <button class="nav-btn" data-view="history">🕘 Verlauf</button>
       </nav>
 
       <button id="choose-location-btn" class="choose-location-btn" type="button">

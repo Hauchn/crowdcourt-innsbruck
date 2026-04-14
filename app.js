@@ -1,7 +1,5 @@
 const INNSBRUCK_CENTER = [47.2692, 11.4041];
 const SEARCH_RADIUS_METERS = 15000;
-const DEFAULT_ROUTE_ORIGIN_NAME = "Marktplatz Innsbruck";
-const DEFAULT_ROUTE_ORIGIN_COORDS = [47.26846, 11.39227];
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
@@ -12,6 +10,7 @@ const FETCH_TIMEOUT_MS = 12000;
 const ONBOARDING_KEY = "crowdcourt:onboarding-seen";
 const COMMENTS_STORAGE_KEY = "crowdcourt:spot-comments-v1";
 const USER_ID_KEY = "crowdcourt:user-id-v1";
+const AUTO_PRESENCE_OPTIN_KEY = "crowdcourt:auto-presence-optin-v1";
 
 const sportsConfig = {
   soccer: { label: "Fussball", color: "#16a34a", icon: "⚽" },
@@ -28,7 +27,7 @@ const state = {
   selectedPlaceId: null,
   userLocation: null,
   userMarker: null,
-  currentView: "map",
+  currentView: "home",
   favorites: new Set(),
   history: [],
   routeLayer: null,
@@ -48,6 +47,7 @@ const state = {
   heartbeatTimerId: null,
   crowdRefreshTimerId: null,
   backendMode: "unknown",
+  autoPresenceOptIn: false,
 };
 
 const map = L.map("map", {
@@ -80,12 +80,16 @@ const reloadButton = document.getElementById("reload-btn");
 const freshLoadButton = document.getElementById("fresh-load-btn");
 const locateButton = document.getElementById("locate-btn");
 const clearFiltersButton = document.getElementById("clear-filters-btn");
+const presenceOptinToggle = document.getElementById("presence-optin-toggle");
 const searchInput = document.getElementById("search-input");
 const spotsList = document.getElementById("spots-list");
 const navButtons = document.querySelectorAll(".nav-btn");
 const panelTitle = document.getElementById("panel-title");
 const clearHistoryButton = document.getElementById("clear-history-btn");
 const chooseLocationButton = document.getElementById("choose-location-btn");
+const homeHub = document.getElementById("home-hub");
+const mapStage = document.querySelector(".map-stage");
+const contentSection = document.querySelector(".content");
 const selectedSpotCard = document.getElementById("selected-spot-card");
 const selectedNameElement = document.getElementById("selected-name");
 const selectedDistanceElement = document.getElementById("selected-distance");
@@ -100,7 +104,17 @@ const onboardingBanner = document.getElementById("onboarding-banner");
 const dismissOnboardingButton = document.getElementById("dismiss-onboarding-btn");
 const routeInfoElement = document.getElementById("route-info");
 const retryButton = document.getElementById("retry-btn");
+const closeButton = document.querySelector(".close-btn");
+const layoutElement = document.querySelector(".layout");
 let searchDebounceId = null;
+
+function getViewFromHash() {
+  const hash = String(window.location.hash || "").replace(/^#\/?/, "");
+  if (hash === "map" || hash === "favorites" || hash === "home") {
+    return hash;
+  }
+  return "home";
+}
 
 function getOrCreateUserId() {
   const existing = localStorage.getItem(USER_ID_KEY);
@@ -126,6 +140,7 @@ function updatePrimaryActionState() {
   chooseLocationButton.textContent = hasSelection
     ? `Route zu ${selectedPlace.name}`
     : "Wähle zuerst einen Spot";
+  chooseLocationButton.dataset.state = hasSelection ? "ready" : "idle";
 }
 
 function resetListScroll() {
@@ -139,18 +154,24 @@ function setGuidanceText() {
   if (!viewGuidanceElement) {
     return;
   }
+  if (state.currentView === "home") {
+    viewGuidanceElement.textContent = "Start: Sport wählen und dann Karte oder Favoriten öffnen.";
+    return;
+  }
+  const selectedPlace = getSelectedPlace();
   if (state.currentView === "map") {
-    viewGuidanceElement.textContent =
-      "Flow: Sport filtern, Spot auswählen und dann Route starten.";
+    if (!selectedPlace) {
+      viewGuidanceElement.textContent = "Nächster Schritt: Spot auswählen, um die Route zu starten.";
+      return;
+    }
+    viewGuidanceElement.textContent = `Nächster Schritt: Route zu ${selectedPlace.name} starten.`;
     return;
   }
   if (state.currentView === "favorites") {
-    viewGuidanceElement.textContent =
-      "Favoriten speichern und von hier direkt erneut auswählen.";
+    viewGuidanceElement.textContent = "Markiere Spots, um sie hier schnell wiederzufinden.";
     return;
   }
-  viewGuidanceElement.textContent =
-    "Verlauf zeigt zuletzt genutzte Spots für schnellen Wiedereinstieg.";
+  viewGuidanceElement.textContent = "Zuletzt geöffnete Spots erscheinen hier für den schnellen Wiedereinstieg.";
 }
 
 function updateSelectedSpotCard() {
@@ -165,13 +186,24 @@ function updateSelectedSpotCard() {
   selectedSpotCard.hidden = false;
   selectedNameElement.textContent = selected.name;
   selectedDistanceElement.textContent = formatDistance(selected.distanceMeters);
-  selectedSportsElement.textContent = selected.sports.map((sport) => sportsConfig[sport].label).join(", ");
+  const sportsMarkup = selected.sports
+    .map((sport) => {
+      const config = sportsConfig[sport];
+      if (!config) {
+        return "";
+      }
+      return `<span class="sport-chip">${config.icon} ${escapeHtml(config.label)}</span>`;
+    })
+    .filter(Boolean)
+    .join("");
   const crowdData = state.crowdBySpotId[selected.id];
-  if (crowdData) {
-    selectedSportsElement.textContent += ` · Live: ${crowdPillText(crowdData)}`;
-  } else {
-    selectedSportsElement.textContent += " · Keine Live-Daten";
-  }
+  const crowdLabel = crowdData
+    ? `<span class="crowd-pill ${crowdPillClass(crowdData.bucket)}">Live: ${escapeHtml(crowdPillText(crowdData))}</span>`
+    : '<span class="crowd-pill crowd-unknown">Keine Live-Daten</span>';
+  const confidenceHint = crowdData?.confidence
+    ? `<span class="crowd-confidence">Verlässlichkeit: ${escapeHtml(crowdConfidenceText(crowdData.confidence))}</span>`
+    : "";
+  selectedSportsElement.innerHTML = `${sportsMarkup}${crowdLabel}${confidenceHint}`;
 }
 
 function updateLastUpdatedLabel() {
@@ -215,6 +247,27 @@ function crowdPillText(crowdData) {
   return `${level} (${crowdData.count})`;
 }
 
+function crowdConfidenceText(confidence) {
+  if (confidence === "high") {
+    return "hoch";
+  }
+  if (confidence === "medium") {
+    return "mittel";
+  }
+  return "niedrig";
+}
+
+function crowdFreshnessText(freshnessSeconds) {
+  if (typeof freshnessSeconds !== "number") {
+    return "Aktualität unbekannt";
+  }
+  if (freshnessSeconds < 60) {
+    return "vor <1 min aktualisiert";
+  }
+  const minutes = Math.round(freshnessSeconds / 60);
+  return `vor ${minutes} min aktualisiert`;
+}
+
 function renderRecentsStrip() {
   if (!recentsStrip) {
     return;
@@ -234,7 +287,7 @@ function renderRecentsStrip() {
   recentsStrip.innerHTML = recentPlaces
     .map(
       (place) =>
-        `<button class="recent-chip" data-recent-id="${place.id}" type="button">${escapeHtml(place.name)}</button>`
+        `<button class="recent-chip ${state.selectedPlaceId === place.id ? "active" : ""}" data-recent-id="${place.id}" type="button">${escapeHtml(place.name)}</button>`
     )
     .join("");
 }
@@ -244,7 +297,25 @@ function initOnboarding() {
     return;
   }
   const seen = localStorage.getItem(ONBOARDING_KEY) === "1";
-  onboardingBanner.hidden = seen;
+  if (seen) {
+    onboardingBanner.remove();
+    return;
+  }
+  onboardingBanner.hidden = false;
+  if (dismissOnboardingButton) {
+    dismissOnboardingButton.onclick = (event) => {
+      event.preventDefault();
+      dismissOnboarding();
+    };
+  }
+}
+
+function dismissOnboarding() {
+  if (!onboardingBanner) {
+    return;
+  }
+  localStorage.setItem(ONBOARDING_KEY, "1");
+  onboardingBanner.remove();
 }
 
 function updateRetryButton() {
@@ -265,6 +336,18 @@ function updateActionStates() {
   if (locateButton) {
     locateButton.disabled = state.isLocating;
     locateButton.textContent = state.isLocating ? "Standort wird ermittelt..." : "Standort nutzen";
+  }
+  if (retryButton) {
+    const labelByAction = {
+      load: "Spots neu laden",
+      route: "Route erneut versuchen",
+      location: "Standort erneut anfragen",
+      crowd: "Live-Daten neu laden",
+    };
+    retryButton.textContent = labelByAction[state.lastFailedAction] || "Erneut versuchen";
+  }
+  if (chooseLocationButton) {
+    chooseLocationButton.hidden = state.currentView !== "map";
   }
   updatePrimaryActionState();
   updateRetryButton();
@@ -323,6 +406,13 @@ async function loadCrowdForSpots(spotIds) {
       ...state.crowdBySpotId,
       ...(data.spots || {}),
     };
+    const freshnessValues = Object.values(data.spots || {})
+      .map((entry) => entry?.freshnessSeconds)
+      .filter((value) => typeof value === "number");
+    if (freshnessValues.length > 0) {
+      const freshest = Math.min(...freshnessValues);
+      lastUpdatedElement.textContent = `Live: ${crowdFreshnessText(freshest)}`;
+    }
     clearFailureState();
   } catch (error) {
     console.error(error);
@@ -344,6 +434,18 @@ async function requireUserLocationForContribution() {
       { enableHighAccuracy: true, timeout: 10000 }
     );
   });
+}
+
+async function ensureRoutingOrigin() {
+  if (state.userLocation) {
+    return state.userLocation;
+  }
+  const [lat, lon] = await requireUserLocationForContribution();
+  state.userLocation = [lat, lon];
+  updateUserLocationMarker();
+  recalculateDistances();
+  updateVisibilityAndList();
+  return state.userLocation;
 }
 
 async function checkInAtSpot(place) {
@@ -418,7 +520,13 @@ function startHeartbeatLoop() {
   if (!state.checkedInSpotId) {
     return;
   }
+  if (!state.autoPresenceOptIn) {
+    return;
+  }
   state.heartbeatTimerId = setInterval(async () => {
+    if (document.visibilityState !== "visible") {
+      return;
+    }
     const spot = state.places.find((p) => p.id === state.checkedInSpotId);
     if (!spot) {
       return;
@@ -448,6 +556,9 @@ function startCrowdRefreshLoop() {
     clearInterval(state.crowdRefreshTimerId);
   }
   state.crowdRefreshTimerId = setInterval(() => {
+    if (document.visibilityState !== "visible") {
+      return;
+    }
     const visibleSpotIds = state.visiblePlaces.map((place) => place.id).slice(0, 100);
     if (visibleSpotIds.length > 0) {
       loadCrowdForSpots(visibleSpotIds);
@@ -457,8 +568,10 @@ function startCrowdRefreshLoop() {
 
 function selectPlace(place, { centerMap = false, openPopup = false } = {}) {
   state.selectedPlaceId = place.id;
+  statusElement.textContent = `Spot ausgewählt: ${place.name}. Du kannst jetzt die Route starten.`;
   updatePrimaryActionState();
   renderList();
+  renderRecentsStrip();
   if (centerMap) {
     map.setView(place.latLng, 16);
   }
@@ -493,9 +606,17 @@ function loadSavedState() {
         state.commentsByPlace = parsedComments;
       }
     }
+    state.autoPresenceOptIn = localStorage.getItem(AUTO_PRESENCE_OPTIN_KEY) === "1";
   } catch (error) {
     console.error("Local storage konnte nicht gelesen werden", error);
   }
+}
+
+function syncAutoPresenceUI() {
+  if (!presenceOptinToggle) {
+    return;
+  }
+  presenceOptinToggle.checked = state.autoPresenceOptIn;
 }
 
 function saveFavorites() {
@@ -662,8 +783,11 @@ function formatDistance(meters) {
 
 function getCrowdLevel(placeId) {
   const crowdData = state.crowdBySpotId[placeId];
+  const confidenceLabel = crowdData?.confidence
+    ? `, Verlässlichkeit ${crowdConfidenceText(crowdData.confidence)}`
+    : "";
   return {
-    label: crowdPillText(crowdData),
+    label: `${crowdPillText(crowdData)}${confidenceLabel}`,
     className: crowdPillClass(crowdData?.bucket),
   };
 }
@@ -740,8 +864,11 @@ function updateVisibilityAndList() {
 
   if (state.selectedPlaceId) {
     const stillVisible = state.visiblePlaces.some((place) => place.id === state.selectedPlaceId);
-    if (!stillVisible && state.currentView === "map") {
+    if (!stillVisible) {
       state.selectedPlaceId = null;
+      if (state.currentView === "map") {
+        statusElement.textContent = "Auswahl zurückgesetzt: Spot passt nicht mehr zu den aktiven Filtern.";
+      }
       updatePrimaryActionState();
     }
   }
@@ -771,48 +898,50 @@ function updatePanelState() {
   if (!panelTitle || !clearHistoryButton) {
     return;
   }
-  if (state.currentView === "map") {
-    panelTitle.textContent = "Spots in deiner Nähe";
-    clearHistoryButton.style.display = "none";
-    return;
-  }
   if (state.currentView === "favorites") {
     panelTitle.textContent = "Deine Favoriten";
     clearHistoryButton.style.display = "none";
     return;
   }
-  panelTitle.textContent = "Zuletzt angesehen";
-  clearHistoryButton.style.display = "inline-flex";
+  panelTitle.textContent = "Spots in deiner Nähe";
+  clearHistoryButton.style.display = "none";
 }
 
 function getEmptyStateText() {
   if (state.isLoadingPlaces) {
     return "";
   }
+  const searchTerm = String(searchInput?.value || "").trim();
   if (state.currentView === "map") {
+    if (state.places.length === 0) {
+      return "Noch keine Daten geladen. Tippe auf 'Neu laden', um Spots abzurufen.";
+    }
+    if (searchTerm && state.visiblePlaces.length === 0) {
+      return `Keine Treffer für "${searchTerm}". Suche anpassen oder Filter zurücksetzen.`;
+    }
     if (state.activeSports.size === 0) {
       return "Wähle mindestens eine Sportart, um Spots zu sehen.";
     }
-    return "Keine Spots für diese Filter gefunden.";
+    return "Keine Spots für diese Filter gefunden. Filter lockern oder neu laden.";
   }
   if (state.currentView === "favorites") {
-    return "Du hast noch keine Favoriten gespeichert.";
+    return "Du hast noch keine Favoriten gespeichert. Tippe bei einem Spot auf 'Merken'.";
   }
-  return "Dein Verlauf ist noch leer.";
+  return "Dein Verlauf ist noch leer. Oeffne einen Spot, damit er hier erscheint.";
 }
 
 function getErrorStateText() {
   if (state.lastFailedAction === "load") {
-    return "Spots konnten nicht geladen werden. Tippe auf 'Erneut versuchen'.";
+    return "Spots konnten nicht geladen werden. Nutze den Retry-Button für einen neuen Abruf.";
   }
   if (state.lastFailedAction === "crowd") {
-    return "Live-Belegung aktuell nicht verfügbar. Erneut versuchen.";
+    return "Live-Belegung aktuell nicht verfügbar. Starte den Abruf erneut.";
   }
   if (state.lastFailedAction === "route") {
-    return "Route fehlgeschlagen. Wähle einen Spot und versuche es erneut.";
+    return "Route fehlgeschlagen. Spot prüfen und erneut starten.";
   }
   if (state.lastFailedAction === "location") {
-    return "Standortzugriff fehlgeschlagen. Standortfreigabe prüfen und erneut versuchen.";
+    return "Standortzugriff fehlgeschlagen. Freigabe prüfen und Standort erneut anfragen.";
   }
   return "";
 }
@@ -996,17 +1125,17 @@ async function showRouteOnMap(destinationLatLng, destinationName) {
   }
   state.isRouting = true;
   updateActionStates();
-  const originCoords = state.userLocation || DEFAULT_ROUTE_ORIGIN_COORDS;
-  const originName = state.userLocation ? "Dein Standort" : `${DEFAULT_ROUTE_ORIGIN_NAME} (Fallback)`;
-  const [originLat, originLon] = originCoords;
-  const [destLat, destLon] = destinationLatLng;
-  const routeUrl = `https://router.project-osrm.org/route/v1/foot/${originLon},${originLat};${destLon},${destLat}?overview=full&geometries=geojson`;
-
-  if (routeInfoElement) {
-    routeInfoElement.textContent = "Route wird berechnet...";
-  }
-
   try {
+    const originCoords = await ensureRoutingOrigin();
+    const originName = "Dein Standort";
+    const [originLat, originLon] = originCoords;
+    const [destLat, destLon] = destinationLatLng;
+    const routeUrl = `https://router.project-osrm.org/route/v1/foot/${originLon},${originLat};${destLon},${destLat}?overview=full&geometries=geojson`;
+
+    if (routeInfoElement) {
+      routeInfoElement.textContent = "Route wird berechnet...";
+    }
+
     const response = await fetch(routeUrl);
     if (!response.ok) {
       throw new Error(`Routing API Status ${response.status}`);
@@ -1055,10 +1184,17 @@ async function showRouteOnMap(destinationLatLng, destinationName) {
     clearFailureState();
   } catch (error) {
     console.error(error);
-    if (routeInfoElement) {
-      routeInfoElement.textContent = "Route konnte nicht geladen werden";
+    if (String(error?.message || "").includes("Standortfreigabe nötig")) {
+      if (routeInfoElement) {
+        routeInfoElement.textContent = "Standortfreigabe nötig, um Route zu starten.";
+      }
+      setFailureState("location", "Standortfreigabe nötig, um Route zu starten.");
+    } else {
+      if (routeInfoElement) {
+        routeInfoElement.textContent = "Route konnte nicht geladen werden";
+      }
+      setFailureState("route", "Route konnte nicht geladen werden");
     }
-    setFailureState("route", "Route konnte nicht geladen werden");
   } finally {
     state.isRouting = false;
     updateActionStates();
@@ -1251,14 +1387,44 @@ function setupListActions() {
   });
 }
 
-function setView(view) {
+function setView(view, { syncHash = true } = {}) {
   state.currentView = view;
   navButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.view === view);
   });
+  if (layoutElement) {
+    layoutElement.classList.remove("view-home", "view-map", "view-favorites");
+    layoutElement.classList.add(`view-${view}`);
+  }
+  if (homeHub) {
+    homeHub.hidden = view !== "home";
+  }
+  if (mapStage) {
+    mapStage.hidden = view !== "map";
+  }
+  if (contentSection) {
+    contentSection.hidden = view === "home";
+  }
   renderList();
   resetListScroll();
   renderRecentsStrip();
+  setGuidanceText();
+  updateActionStates();
+  if (syncHash) {
+    window.location.hash = `/${view}`;
+  }
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  if (view === "map") {
+    window.setTimeout(() => {
+      map.invalidateSize();
+      if (!state.userLocation) {
+        map.setView(INNSBRUCK_CENTER, 12);
+      }
+    }, 80);
+    window.setTimeout(() => {
+      map.invalidateSize();
+    }, 220);
+  }
 }
 
 function requestUserLocation() {
@@ -1318,6 +1484,19 @@ function wireEvents() {
     });
   }
 
+  if (presenceOptinToggle) {
+    presenceOptinToggle.addEventListener("change", () => {
+      state.autoPresenceOptIn = presenceOptinToggle.checked;
+      localStorage.setItem(AUTO_PRESENCE_OPTIN_KEY, state.autoPresenceOptIn ? "1" : "0");
+      if (state.autoPresenceOptIn) {
+        statusElement.textContent = "Auto-Presence aktiv: Live-Daten werden im Vordergrund aktualisiert.";
+      } else {
+        statusElement.textContent = "Auto-Presence deaktiviert: nur manuelle Check-ins bleiben aktiv.";
+      }
+      startHeartbeatLoop();
+    });
+  }
+
   navButtons.forEach((button) => {
     button.addEventListener("click", () => {
       const view = button.dataset.view;
@@ -1327,6 +1506,19 @@ function wireEvents() {
       setView(view);
     });
   });
+
+  if (homeHub) {
+    homeHub.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLButtonElement)) {
+        return;
+      }
+      const action = target.dataset.homeAction;
+      if (action === "map" || action === "favorites") {
+        setView(action);
+      }
+    });
+  }
 
   if (clearHistoryButton) {
     clearHistoryButton.addEventListener("click", () => {
@@ -1437,15 +1629,39 @@ function wireEvents() {
         return;
       }
       selectPlace(place, { centerMap: true, openPopup: true });
+      addToHistory(place);
     });
   }
 
   if (dismissOnboardingButton && onboardingBanner) {
     dismissOnboardingButton.addEventListener("click", () => {
-      onboardingBanner.hidden = true;
-      localStorage.setItem(ONBOARDING_KEY, "1");
+      dismissOnboarding();
     });
   }
+
+  if (closeButton) {
+    closeButton.addEventListener("click", () => {
+      clearRouteDisplay();
+      map.closePopup();
+      state.selectedPlaceId = null;
+      renderList();
+      updateSelectedSpotCard();
+      updatePrimaryActionState();
+      setGuidanceText();
+      statusElement.textContent = "Auswahl und Route wurden zurückgesetzt.";
+    });
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    if (target.id === "dismiss-onboarding-btn") {
+      event.preventDefault();
+      dismissOnboarding();
+    }
+  });
 }
 
 async function loadSportsPlaces() {
@@ -1522,8 +1738,16 @@ if (freshLoadButton) {
 setupListActions();
 loadSavedState();
 state.userId = getOrCreateUserId();
+syncAutoPresenceUI();
 initOnboarding();
 wireEvents();
+window.addEventListener("hashchange", () => {
+  const nextView = getViewFromHash();
+  if (nextView !== state.currentView) {
+    setView(nextView, { syncHash: false });
+  }
+});
+setView(getViewFromHash(), { syncHash: false });
 updateActionStates();
 startCrowdRefreshLoop();
 loadBackendHealth().finally(() => {

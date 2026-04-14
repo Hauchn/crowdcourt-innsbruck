@@ -1,19 +1,27 @@
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
+const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
+const { EventEmitter } = require("events");
 
 const PORT = Number(process.env.PORT || 8080);
 const DATABASE_URL =
   process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/crowdcourt";
 const PRESENCE_TTL_MINUTES = 90;
+const HEARTBEAT_EXTENSION_MINUTES = 20;
 const PROXIMITY_THRESHOLD_METERS = 120;
 const RATE_LIMIT_MS = 20_000;
+const MAX_MOVEMENT_SPEED_MPS = 45;
+const SOFT_BLOCK_WINDOW_MS = 10 * 60 * 1000;
+const SOFT_BLOCK_MAX_DISTINCT_SPOTS = 8;
+const SOFT_BLOCK_DURATION_MS = 10 * 60 * 1000;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.resolve(__dirname)));
+const agentBus = new EventEmitter();
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
@@ -22,6 +30,19 @@ const pool = new Pool({
 const rateLimitStore = new Map();
 const memoryPresence = new Map();
 const memoryEvents = [];
+const movementStore = new Map();
+const softBlockStore = new Map();
+const qualityMetrics = {
+  acceptedSignals: 0,
+  rejectedSignals: 0,
+  rejectedByReason: {
+    rate_limit: 0,
+    soft_block: 0,
+    distance: 0,
+    speed: 0,
+    invalid_coordinates: 0,
+  },
+};
 let runtimeMode = "postgres";
 
 function isFiniteNumber(value) {
@@ -42,12 +63,12 @@ function toBucket(count) {
   return "low";
 }
 
-function toConfidence(count, updatedAt) {
-  const ageMs = Date.now() - new Date(updatedAt).getTime();
-  if (count >= 10 || (ageMs < 5 * 60 * 1000 && count >= 5)) {
+function toConfidence(count, freshnessSeconds, activeContributors) {
+  const fresh = typeof freshnessSeconds === "number" ? freshnessSeconds : Number.MAX_SAFE_INTEGER;
+  if (activeContributors >= 10 || (fresh <= 300 && activeContributors >= 5)) {
     return "high";
   }
-  if (count >= 2 && count <= 9) {
+  if (count >= 2 && count <= 9 && fresh <= 900) {
     return "medium";
   }
   return "low";
@@ -66,14 +87,196 @@ function haversineMeters(aLat, aLon, bLat, bLon) {
   return 2 * earthRadius * Math.asin(Math.sqrt(h));
 }
 
-function checkRateLimit(key) {
+function toSportLabel(key) {
+  if (key === "soccer") {
+    return "Fussball";
+  }
+  if (key === "tennis") {
+    return "Tennis";
+  }
+  if (key === "volleyball") {
+    return "Volleyball";
+  }
+  if (key === "table_tennis") {
+    return "Tischtennis";
+  }
+  return key;
+}
+
+function parseSportsList(rawSports) {
+  if (!Array.isArray(rawSports) || rawSports.length === 0) {
+    return ["soccer", "tennis", "volleyball", "table_tennis"];
+  }
+  const allowed = new Set(["soccer", "tennis", "volleyball", "table_tennis"]);
+  const filtered = rawSports.filter((sport) => allowed.has(sport));
+  return filtered.length > 0 ? filtered : ["soccer", "tennis", "volleyball", "table_tennis"];
+}
+
+async function fetchInnsbruckSportsPlaces({ sports, limit }) {
+  const sportsList = parseSportsList(sports);
+  const maxResults = Math.max(1, Math.min(Number(limit) || 20, 80));
+  const overpassQuery = `
+[out:json][timeout:20];
+(
+  node["leisure"="pitch"]["sport"~"${sportsList.join("|")}"](around:15000,47.2692,11.4041);
+  way["leisure"="pitch"]["sport"~"${sportsList.join("|")}"](around:15000,47.2692,11.4041);
+  node["leisure"="sports_centre"]["sport"~"${sportsList.join("|")}"](around:15000,47.2692,11.4041);
+  way["leisure"="sports_centre"]["sport"~"${sportsList.join("|")}"](around:15000,47.2692,11.4041);
+);
+out center tags;
+`;
+  const endpoints = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+  ];
+
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
+        body: overpassQuery,
+      });
+      if (!response.ok) {
+        continue;
+      }
+      const data = await response.json();
+      const mapped = (data.elements || [])
+        .map((item) => {
+          const lat = Number(item.lat ?? item.center?.lat);
+          const lon = Number(item.lon ?? item.center?.lon);
+          if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+            return null;
+          }
+          const sportsRaw = String(item.tags?.sport || "");
+          const tagsSports = sportsRaw
+            .split(";")
+            .map((part) => part.trim())
+            .filter(Boolean);
+          const matchedSports = tagsSports.filter((sport) => sportsList.includes(sport));
+          return {
+            id: `${item.type}/${item.id}`,
+            name: item.tags?.name || "Unbenannter Sportplatz",
+            lat,
+            lon,
+            sports: matchedSports.length > 0 ? matchedSports : sportsList,
+          };
+        })
+        .filter(Boolean)
+        .slice(0, maxResults);
+      if (mapped.length > 0) {
+        return mapped;
+      }
+    } catch {
+      // Try next endpoint.
+    }
+  }
+
+  const fallbackPlaces = [
+    { id: "fallback/1", name: "Sportzentrum Universität Innsbruck", lat: 47.2634, lon: 11.3435 },
+    { id: "fallback/2", name: "Tennisclub Innsbruck", lat: 47.2717, lon: 11.3998 },
+    { id: "fallback/3", name: "Sportanlage Tivoli", lat: 47.2571, lon: 11.4179 },
+    { id: "fallback/4", name: "Beachvolleyball Rapoldipark", lat: 47.2663, lon: 11.4099 },
+  ];
+  return fallbackPlaces.slice(0, maxResults).map((place) => ({
+    ...place,
+    sports: sportsList,
+  }));
+}
+
+function buildPlanFromPlaces(places, options = {}) {
+  const {
+    startHour = "17:00",
+    maxStops = 3,
+    focus = null,
+    travelMode = "zu Fuss",
+  } = options;
+  const filtered = focus
+    ? places.filter((place) => place.sports.includes(focus))
+    : places;
+  const selected = filtered.slice(0, Math.max(1, Math.min(Number(maxStops) || 3, 6)));
+  return {
+    title: "Sport-Session Innsbruck",
+    startHour,
+    travelMode,
+    stops: selected.map((place, index) => ({
+      order: index + 1,
+      placeId: place.id,
+      placeName: place.name,
+      coords: { lat: place.lat, lon: place.lon },
+      activity: `Spiele ${toSportLabel(place.sports[0] || "sport")}`,
+      durationMinutes: 60,
+    })),
+  };
+}
+
+function checkRateLimit(key, minIntervalMs = RATE_LIMIT_MS) {
   const now = Date.now();
   const last = rateLimitStore.get(key);
-  if (last && now - last < RATE_LIMIT_MS) {
+  if (last && now - last < minIntervalMs) {
     return false;
   }
   rateLimitStore.set(key, now);
   return true;
+}
+
+function getRequestIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  if (forwarded) {
+    return forwarded;
+  }
+  return req.ip || "unknown";
+}
+
+function metricReject(reason) {
+  qualityMetrics.rejectedSignals += 1;
+  if (qualityMetrics.rejectedByReason[reason] != null) {
+    qualityMetrics.rejectedByReason[reason] += 1;
+  }
+}
+
+function metricAccept() {
+  qualityMetrics.acceptedSignals += 1;
+}
+
+function isSoftBlocked(identityKey) {
+  const entry = softBlockStore.get(identityKey);
+  if (!entry) {
+    return false;
+  }
+  if (entry.blockedUntil > Date.now()) {
+    return true;
+  }
+  softBlockStore.delete(identityKey);
+  return false;
+}
+
+function registerPresenceSignal(identityKey, spotId) {
+  const now = Date.now();
+  const entry = softBlockStore.get(identityKey) || {
+    blockedUntil: 0,
+    visits: [],
+  };
+  entry.visits = entry.visits.filter((visit) => now - visit.at <= SOFT_BLOCK_WINDOW_MS);
+  entry.visits.push({ spotId, at: now });
+  const distinctSpots = new Set(entry.visits.map((visit) => visit.spotId)).size;
+  if (distinctSpots > SOFT_BLOCK_MAX_DISTINCT_SPOTS) {
+    entry.blockedUntil = now + SOFT_BLOCK_DURATION_MS;
+  }
+  softBlockStore.set(identityKey, entry);
+}
+
+function validateMovementPlausibility(userId, userLat, userLon) {
+  const now = Date.now();
+  const previous = movementStore.get(userId);
+  movementStore.set(userId, { lat: userLat, lon: userLon, at: now });
+  if (!previous) {
+    return true;
+  }
+  const elapsedSeconds = Math.max(1, (now - previous.at) / 1000);
+  const distance = haversineMeters(previous.lat, previous.lon, userLat, userLon);
+  const speedMps = distance / elapsedSeconds;
+  return speedMps <= MAX_MOVEMENT_SPEED_MPS;
 }
 
 function invalidBodyResponse(res, message) {
@@ -100,14 +303,25 @@ function cleanupExpiredMemoryPresence() {
 }
 
 function memorySpotCount(spotId) {
+  return memorySpotStats(spotId).count;
+}
+
+function memorySpotStats(spotId) {
   cleanupExpiredMemoryPresence();
   let count = 0;
+  let lastSeenAt = null;
+  const contributors = new Set();
   for (const value of memoryPresence.values()) {
     if (value.spotId === spotId) {
       count += 1;
+      contributors.add(value.userId);
+      if (!lastSeenAt || value.lastSeenAt > lastSeenAt) {
+        lastSeenAt = value.lastSeenAt;
+      }
     }
   }
-  return count;
+  const freshnessSeconds = lastSeenAt ? Math.max(0, Math.round((Date.now() - lastSeenAt) / 1000)) : null;
+  return { count, freshnessSeconds, activeContributors: contributors.size };
 }
 
 async function cleanupExpiredPresence(client) {
@@ -158,19 +372,32 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/presence/checkin", async (req, res) => {
   const { userId, spotId, spotLat, spotLon, userLat, userLon } = req.body || {};
+  const identityKey = `${userId}:${getRequestIp(req)}`;
   if (!userId || !spotId) {
     return invalidBodyResponse(res, "userId und spotId sind erforderlich");
   }
   if (!validateCoordinates([spotLat, spotLon, userLat, userLon])) {
+    metricReject("invalid_coordinates");
     return invalidBodyResponse(res, "Ungültige Koordinaten");
   }
-  if (!checkRateLimit(`checkin:${userId}`)) {
+  if (!checkRateLimit(`checkin:${identityKey}`)) {
+    metricReject("rate_limit");
     return res.status(429).json({ ok: false, error: "Zu viele Anfragen" });
+  }
+  if (isSoftBlocked(identityKey)) {
+    metricReject("soft_block");
+    return res.status(429).json({ ok: false, error: "Zu viele Spot-Wechsel in kurzer Zeit. Bitte kurz warten." });
   }
   const distance = haversineMeters(userLat, userLon, spotLat, spotLon);
   if (distance > PROXIMITY_THRESHOLD_METERS) {
+    metricReject("distance");
     return res.status(403).json({ ok: false, error: "Du bist zu weit vom Spot entfernt." });
   }
+  if (!validateMovementPlausibility(userId, userLat, userLon)) {
+    metricReject("speed");
+    return res.status(403).json({ ok: false, error: "Bewegung unplausibel. Bitte erneut versuchen." });
+  }
+  registerPresenceSignal(identityKey, spotId);
 
   const expiresAt = new Date(Date.now() + PRESENCE_TTL_MINUTES * 60 * 1000);
 
@@ -193,6 +420,7 @@ app.post("/api/presence/checkin", async (req, res) => {
       createdAt: new Date().toISOString(),
     });
     const activeNow = memorySpotCount(spotId);
+    metricAccept();
     return res.json({
       ok: true,
       spotId,
@@ -221,6 +449,7 @@ app.post("/api/presence/checkin", async (req, res) => {
     await logEvent(client, userId, spotId, eventType);
     const activeNow = await getSpotCount(client, spotId);
     await client.query("COMMIT");
+    metricAccept();
     return res.json({
       ok: true,
       spotId,
@@ -273,21 +502,34 @@ app.post("/api/presence/checkout", async (req, res) => {
 
 app.post("/api/presence/heartbeat", async (req, res) => {
   const { userId, spotId, spotLat, spotLon, userLat, userLon } = req.body || {};
+  const identityKey = `${userId}:${getRequestIp(req)}`;
   if (!userId || !spotId) {
     return invalidBodyResponse(res, "userId und spotId sind erforderlich");
   }
   if (!validateCoordinates([spotLat, spotLon, userLat, userLon])) {
+    metricReject("invalid_coordinates");
     return invalidBodyResponse(res, "Ungültige Koordinaten");
   }
-  if (!checkRateLimit(`heartbeat:${userId}`)) {
+  if (!checkRateLimit(`heartbeat:${identityKey}`, 10_000)) {
+    metricReject("rate_limit");
     return res.status(429).json({ ok: false, error: "Zu viele Anfragen" });
+  }
+  if (isSoftBlocked(identityKey)) {
+    metricReject("soft_block");
+    return res.status(429).json({ ok: false, error: "Temporär blockiert. Bitte kurz warten." });
   }
   const distance = haversineMeters(userLat, userLon, spotLat, spotLon);
   if (distance > PROXIMITY_THRESHOLD_METERS) {
+    metricReject("distance");
     return res.status(403).json({ ok: false, error: "Du bist zu weit vom Spot entfernt." });
   }
+  if (!validateMovementPlausibility(userId, userLat, userLon)) {
+    metricReject("speed");
+    return res.status(403).json({ ok: false, error: "Bewegung unplausibel. Bitte erneut versuchen." });
+  }
+  registerPresenceSignal(identityKey, spotId);
 
-  const expiresAt = new Date(Date.now() + PRESENCE_TTL_MINUTES * 60 * 1000);
+  const expiresAt = new Date(Date.now() + HEARTBEAT_EXTENSION_MINUTES * 60 * 1000);
 
   if (runtimeMode === "memory") {
     memoryPresence.set(memoryKey(userId, spotId), {
@@ -299,6 +541,7 @@ app.post("/api/presence/heartbeat", async (req, res) => {
       expiresAt: expiresAt.getTime(),
     });
     await logEvent(null, userId, spotId, "heartbeat");
+    metricAccept();
     return res.json({ ok: true, expiresAt: expiresAt.toISOString() });
   }
 
@@ -312,10 +555,11 @@ app.post("/api/presence/heartbeat", async (req, res) => {
        ON CONFLICT (user_id, spot_id)
        DO UPDATE SET lat = EXCLUDED.lat, lon = EXCLUDED.lon, last_seen_at = NOW(), expires_at = NOW() + ($5 || ' minutes')::interval
        RETURNING expires_at`,
-      [userId, spotId, userLat, userLon, PRESENCE_TTL_MINUTES]
+      [userId, spotId, userLat, userLon, HEARTBEAT_EXTENSION_MINUTES]
     );
     await logEvent(client, userId, spotId, "heartbeat");
     await client.query("COMMIT");
+    metricAccept();
     return res.json({ ok: true, expiresAt: result.rows[0].expires_at });
   } catch {
     await client.query("ROLLBACK");
@@ -343,11 +587,14 @@ app.get("/api/crowd", async (req, res) => {
     cleanupExpiredMemoryPresence();
     const spots = {};
     spotIds.forEach((spotId) => {
-      const count = memorySpotCount(spotId);
+      const stats = memorySpotStats(spotId);
+      const confidence = toConfidence(stats.count, stats.freshnessSeconds, stats.activeContributors);
       spots[spotId] = {
-        count,
-        bucket: toBucket(count),
-        confidence: toConfidence(count, updatedAt),
+        count: stats.count,
+        bucket: toBucket(stats.count),
+        confidence,
+        freshnessSeconds: stats.freshnessSeconds,
+        activeContributors: stats.activeContributors,
       };
     });
     return res.json({ updatedAt, spots });
@@ -357,7 +604,10 @@ app.get("/api/crowd", async (req, res) => {
   try {
     await cleanupExpiredPresence(client);
     const queryResult = await client.query(
-      `SELECT spot_id, COUNT(*)::int AS count, MAX(last_seen_at) AS last_seen
+      `SELECT spot_id,
+              COUNT(*)::int AS count,
+              COUNT(DISTINCT user_id)::int AS active_contributors,
+              MAX(last_seen_at) AS last_seen
        FROM active_presence
        WHERE spot_id = ANY($1::text[]) AND expires_at >= NOW()
        GROUP BY spot_id`,
@@ -368,16 +618,23 @@ app.get("/api/crowd", async (req, res) => {
       counts[row.spot_id] = {
         count: row.count,
         lastSeen: row.last_seen,
+        activeContributors: row.active_contributors,
       };
     });
     const spots = {};
     spotIds.forEach((id) => {
       const value = counts[id];
       const count = value?.count || 0;
+      const freshnessSeconds = value?.lastSeen
+        ? Math.max(0, Math.round((Date.now() - new Date(value.lastSeen).getTime()) / 1000))
+        : null;
+      const activeContributors = value?.activeContributors || 0;
       spots[id] = {
         count,
         bucket: toBucket(count),
-        confidence: toConfidence(count, value?.lastSeen || updatedAt),
+        confidence: toConfidence(count, freshnessSeconds, activeContributors),
+        freshnessSeconds,
+        activeContributors,
       };
     });
     return res.json({ updatedAt, spots });
@@ -418,6 +675,81 @@ app.get("/api/crowd/top-spots", async (_req, res) => {
     return res.status(500).json({ ok: false, error: "Top Spots nicht verfügbar" });
   } finally {
     client.release();
+  }
+});
+
+app.get("/api/crowd/metrics", (_req, res) => {
+  const totalSignals = qualityMetrics.acceptedSignals + qualityMetrics.rejectedSignals;
+  const rejectionRate = totalSignals > 0 ? qualityMetrics.rejectedSignals / totalSignals : 0;
+  res.json({
+    ok: true,
+    metrics: {
+      ...qualityMetrics,
+      totalSignals,
+      rejectionRate,
+    },
+  });
+});
+
+app.post("/api/agents/sports-places", async (req, res) => {
+  const { sports, limit } = req.body || {};
+  try {
+    const places = await fetchInnsbruckSportsPlaces({ sports, limit });
+    return res.json({
+      ok: true,
+      agent: "sports",
+      city: "Innsbruck",
+      count: places.length,
+      places,
+    });
+  } catch {
+    return res.status(502).json({
+      ok: false,
+      error: "Sports-Agent konnte Sportplätze nicht laden",
+    });
+  }
+});
+
+app.post("/api/agents/planner", (req, res) => {
+  const { places, options } = req.body || {};
+  if (!Array.isArray(places) || places.length === 0) {
+    return invalidBodyResponse(res, "places ist erforderlich");
+  }
+  const plan = buildPlanFromPlaces(places, options);
+  return res.json({
+    ok: true,
+    agent: "planner",
+    plan,
+  });
+});
+
+app.post("/api/agents/compose-plan", async (req, res) => {
+  const { sports, limit, options } = req.body || {};
+  const requestId = randomUUID();
+  const eventName = `sports-ready:${requestId}`;
+
+  const plannerResultPromise = new Promise((resolve) => {
+    agentBus.once(eventName, (payload) => {
+      resolve(buildPlanFromPlaces(payload.places, options));
+    });
+  });
+
+  try {
+    const places = await fetchInnsbruckSportsPlaces({ sports, limit });
+    agentBus.emit(eventName, { places });
+    const plan = await plannerResultPromise;
+    return res.json({
+      ok: true,
+      linkedAgents: ["sports", "planner"],
+      city: "Innsbruck",
+      places,
+      plan,
+    });
+  } catch {
+    return res.status(502).json({
+      ok: false,
+      error: "Agent-Verkettung fehlgeschlagen",
+    });
   }
 });
 
