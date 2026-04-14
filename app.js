@@ -9,6 +9,8 @@ const OVERPASS_CACHE_TTL_MS = 5 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 12000;
 const ONBOARDING_KEY = "crowdcourt:onboarding-seen";
 const COMMENTS_STORAGE_KEY = "crowdcourt:spot-comments-v1";
+const COMMUNITY_FRIENDS_KEY = "crowdcourt:community-friends-v1";
+const COMMUNITY_MEETUPS_KEY = "crowdcourt:community-meetups-v1";
 const USER_ID_KEY = "crowdcourt:user-id-v1";
 const AUTO_PRESENCE_OPTIN_KEY = "crowdcourt:auto-presence-optin-v1";
 
@@ -48,6 +50,8 @@ const state = {
   crowdRefreshTimerId: null,
   backendMode: "unknown",
   autoPresenceOptIn: false,
+  communityFriends: [],
+  communityMeetups: [],
 };
 
 const map = L.map("map", {
@@ -88,8 +92,17 @@ const panelTitle = document.getElementById("panel-title");
 const clearHistoryButton = document.getElementById("clear-history-btn");
 const chooseLocationButton = document.getElementById("choose-location-btn");
 const homeHub = document.getElementById("home-hub");
+const communityHub = document.getElementById("community-hub");
 const mapStage = document.querySelector(".map-stage");
 const contentSection = document.querySelector(".content");
+const friendForm = document.getElementById("friend-form");
+const meetupForm = document.getElementById("meetup-form");
+const friendNameInput = document.getElementById("friend-name-input");
+const meetupSpotInput = document.getElementById("meetup-spot-input");
+const meetupTimeInput = document.getElementById("meetup-time-input");
+const meetupNoteInput = document.getElementById("meetup-note-input");
+const friendsList = document.getElementById("friends-list");
+const meetupsList = document.getElementById("meetups-list");
 const selectedSpotCard = document.getElementById("selected-spot-card");
 const selectedNameElement = document.getElementById("selected-name");
 const selectedDistanceElement = document.getElementById("selected-distance");
@@ -110,7 +123,7 @@ let searchDebounceId = null;
 
 function getViewFromHash() {
   const hash = String(window.location.hash || "").replace(/^#\/?/, "");
-  if (hash === "map" || hash === "favorites" || hash === "home") {
+  if (hash === "map" || hash === "favorites" || hash === "home" || hash === "community") {
     return hash;
   }
   return "home";
@@ -155,7 +168,7 @@ function setGuidanceText() {
     return;
   }
   if (state.currentView === "home") {
-    viewGuidanceElement.textContent = "Start: Sport wählen und dann Karte oder Favoriten öffnen.";
+    viewGuidanceElement.textContent = "Start: Sport wählen und dann Karte, Favoriten oder Community öffnen.";
     return;
   }
   const selectedPlace = getSelectedPlace();
@@ -169,6 +182,10 @@ function setGuidanceText() {
   }
   if (state.currentView === "favorites") {
     viewGuidanceElement.textContent = "Markiere Spots, um sie hier schnell wiederzufinden.";
+    return;
+  }
+  if (state.currentView === "community") {
+    viewGuidanceElement.textContent = "Community: Freunde hinzufügen und Treffpunkte planen.";
     return;
   }
   viewGuidanceElement.textContent = "Zuletzt geöffnete Spots erscheinen hier für den schnellen Wiedereinstieg.";
@@ -583,6 +600,17 @@ function selectPlace(place, { centerMap = false, openPopup = false } = {}) {
   }
 }
 
+function focusVisiblePlacesOnMap() {
+  if (state.currentView !== "map" || state.visiblePlaces.length === 0) {
+    return;
+  }
+  const bounds = L.latLngBounds(state.visiblePlaces.slice(0, 120).map((place) => place.latLng));
+  if (!bounds.isValid()) {
+    return;
+  }
+  map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+}
+
 function loadSavedState() {
   try {
     const favoritesRaw = localStorage.getItem("crowdcourt:favorites");
@@ -604,6 +632,20 @@ function loadSavedState() {
       const parsedComments = JSON.parse(commentsRaw);
       if (parsedComments && typeof parsedComments === "object") {
         state.commentsByPlace = parsedComments;
+      }
+    }
+    const friendsRaw = localStorage.getItem(COMMUNITY_FRIENDS_KEY);
+    if (friendsRaw) {
+      const parsedFriends = JSON.parse(friendsRaw);
+      if (Array.isArray(parsedFriends)) {
+        state.communityFriends = parsedFriends.slice(0, 50);
+      }
+    }
+    const meetupsRaw = localStorage.getItem(COMMUNITY_MEETUPS_KEY);
+    if (meetupsRaw) {
+      const parsedMeetups = JSON.parse(meetupsRaw);
+      if (Array.isArray(parsedMeetups)) {
+        state.communityMeetups = parsedMeetups.slice(0, 80);
       }
     }
     state.autoPresenceOptIn = localStorage.getItem(AUTO_PRESENCE_OPTIN_KEY) === "1";
@@ -629,6 +671,38 @@ function saveHistory() {
 
 function saveComments() {
   localStorage.setItem(COMMENTS_STORAGE_KEY, JSON.stringify(state.commentsByPlace));
+}
+
+function saveCommunity() {
+  localStorage.setItem(COMMUNITY_FRIENDS_KEY, JSON.stringify(state.communityFriends.slice(0, 50)));
+  localStorage.setItem(COMMUNITY_MEETUPS_KEY, JSON.stringify(state.communityMeetups.slice(0, 80)));
+}
+
+function renderCommunity() {
+  if (friendsList) {
+    if (state.communityFriends.length === 0) {
+      friendsList.innerHTML = "<li>Noch keine Freunde gespeichert.</li>";
+    } else {
+      friendsList.innerHTML = state.communityFriends
+        .slice(0, 12)
+        .map((friend) => `<li>👤 ${escapeHtml(friend.name)}</li>`)
+        .join("");
+    }
+  }
+
+  if (meetupsList) {
+    if (state.communityMeetups.length === 0) {
+      meetupsList.innerHTML = "<li>Noch keine Treffen geplant.</li>";
+    } else {
+      meetupsList.innerHTML = state.communityMeetups
+        .slice(0, 12)
+        .map(
+          (meetup) =>
+            `<li>📍 <strong>${escapeHtml(meetup.spot)}</strong> · ${escapeHtml(meetup.time)}<br><span>${escapeHtml(meetup.note || "Ohne Notiz")}</span></li>`
+        )
+        .join("");
+    }
+  }
 }
 
 async function fetchOverpassData(query) {
@@ -1399,12 +1473,16 @@ function setView(view, { syncHash = true } = {}) {
   if (homeHub) {
     homeHub.hidden = view !== "home";
   }
+  if (communityHub) {
+    communityHub.hidden = view !== "community";
+  }
   if (mapStage) {
     mapStage.hidden = view !== "map";
   }
   if (contentSection) {
-    contentSection.hidden = view === "home";
+    contentSection.hidden = view === "home" || view === "community";
   }
+  renderCommunity();
   renderList();
   resetListScroll();
   renderRecentsStrip();
@@ -1514,9 +1592,51 @@ function wireEvents() {
         return;
       }
       const action = target.dataset.homeAction;
-      if (action === "map" || action === "favorites") {
+      if (action === "map" || action === "favorites" || action === "community") {
         setView(action);
       }
+    });
+  }
+
+  if (friendForm) {
+    friendForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = String(friendNameInput?.value || "").trim();
+      if (!name) {
+        return;
+      }
+      state.communityFriends = [{ name, createdAt: Date.now() }, ...state.communityFriends].slice(0, 50);
+      saveCommunity();
+      renderCommunity();
+      if (friendNameInput) {
+        friendNameInput.value = "";
+      }
+      statusElement.textContent = `Freund hinzugefügt: ${name}`;
+    });
+  }
+
+  if (meetupForm) {
+    meetupForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const spot = String(meetupSpotInput?.value || "").trim();
+      const time = String(meetupTimeInput?.value || "").trim();
+      const note = String(meetupNoteInput?.value || "").trim();
+      if (!spot || !time) {
+        return;
+      }
+      state.communityMeetups = [{ spot, time, note, createdAt: Date.now() }, ...state.communityMeetups].slice(0, 80);
+      saveCommunity();
+      renderCommunity();
+      if (meetupSpotInput) {
+        meetupSpotInput.value = "";
+      }
+      if (meetupTimeInput) {
+        meetupTimeInput.value = "";
+      }
+      if (meetupNoteInput) {
+        meetupNoteInput.value = "";
+      }
+      statusElement.textContent = `Treffen geplant: ${spot} um ${time}`;
     });
   }
 
@@ -1719,6 +1839,14 @@ filterButtons.forEach((button) => {
 
     updateVisibilityAndList();
     updateStatusText();
+    if (state.currentView === "map") {
+      if (state.visiblePlaces.length > 0) {
+        focusVisiblePlacesOnMap();
+      } else {
+        statusElement.textContent =
+          "Keine Spots mit diesen Filtern gefunden. Andere Sportart wählen oder Suche leeren.";
+      }
+    }
   });
 });
 

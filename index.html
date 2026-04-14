@@ -99,6 +99,44 @@
         <div class="home-actions">
           <button class="secondary" type="button" data-home-action="map">Zur Karte</button>
           <button class="secondary" type="button" data-home-action="favorites">Zu Favoriten</button>
+          <button class="secondary" type="button" data-home-action="community">Zur Community</button>
+        </div>
+      </section>
+
+      <section id="community-hub" class="community-hub" hidden>
+        <div class="community-head">
+          <h2>Community</h2>
+          <p>Freunde hinzufügen und gemeinsame Spots planen.</p>
+        </div>
+
+        <div class="community-grid">
+          <form id="friend-form" class="community-card">
+            <h3>Freund hinzufügen</h3>
+            <label>
+              Name
+              <input id="friend-name-input" type="text" maxlength="40" placeholder="z. B. Anna" required />
+            </label>
+            <button class="secondary" type="submit">Freund speichern</button>
+            <ul id="friends-list" class="community-list"></ul>
+          </form>
+
+          <form id="meetup-form" class="community-card">
+            <h3>Treffen planen</h3>
+            <label>
+              Spot / Ort
+              <input id="meetup-spot-input" type="text" maxlength="70" placeholder="z. B. Fennerkaserne" required />
+            </label>
+            <label>
+              Zeit
+              <input id="meetup-time-input" type="text" maxlength="40" placeholder="Heute 18:30" required />
+            </label>
+            <label>
+              Notiz
+              <input id="meetup-note-input" type="text" maxlength="140" placeholder="Wer kommt mit?" />
+            </label>
+            <button class="secondary" type="submit">Treffen posten</button>
+            <ul id="meetups-list" class="community-list"></ul>
+          </form>
         </div>
       </section>
 
@@ -121,6 +159,7 @@
         <button class="nav-btn active" data-view="home">🏠 Home</button>
         <button class="nav-btn" data-view="map">🗺️ Karte</button>
         <button class="nav-btn" data-view="favorites">💙 Favoriten</button>
+        <button class="nav-btn" data-view="community">👥 Community</button>
       </nav>
 
       <button id="choose-location-btn" class="choose-location-btn" type="button">

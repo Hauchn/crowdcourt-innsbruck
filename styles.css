@@ -168,6 +168,16 @@ body {
   display: none !important;
 }
 
+.layout.view-community .map-stage,
+.layout.view-community #home-hub,
+.layout.view-community .content,
+.layout.view-community .controls,
+.layout.view-community .search-row,
+.layout.view-community #selected-spot-card,
+.layout.view-community #onboarding-banner {
+  display: none !important;
+}
+
 .layout.view-home .map-stage,
 .layout.view-home .content {
   display: none !important;
@@ -515,6 +525,95 @@ body {
   gap: 0.5rem;
 }
 
+.community-hub {
+  border: 1px solid #d4e3eb;
+  border-radius: 20px;
+  background: linear-gradient(180deg, #fbfeff, #f3f8fd);
+  padding: 0.82rem;
+  box-shadow: var(--shadow-soft);
+}
+
+.community-head h2 {
+  margin: 0;
+  font-size: var(--font-h2);
+}
+
+.community-head p {
+  margin: 0.24rem 0 0.72rem;
+  color: var(--text-muted);
+  font-size: var(--font-meta);
+}
+
+.community-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.72rem;
+  max-width: 100%;
+}
+
+.community-card {
+  width: 100%;
+  border: 1px solid #d3e2ea;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 0.72rem;
+  display: grid;
+  gap: 0.5rem;
+  box-shadow: 0 8px 20px #17304312;
+}
+
+.community-card h3 {
+  margin: 0;
+  font-size: 0.98rem;
+  color: #214a5a;
+}
+
+.community-card label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: var(--font-tiny);
+  color: #3c5d69;
+  font-weight: 600;
+}
+
+.community-card input {
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  min-height: 44px;
+  padding: 0.5rem 0.58rem;
+  font-size: 0.84rem;
+  background: #fbfdff;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast);
+}
+
+.community-card input:hover {
+  border-color: #98b6c4;
+}
+
+.community-card button.secondary {
+  min-height: 44px;
+  justify-self: start;
+  padding-inline: 0.95rem;
+}
+
+.community-list {
+  list-style: none;
+  margin: 0.12rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.community-list li {
+  border: 1px solid #dce8ee;
+  border-radius: 12px;
+  background: #f8fcff;
+  padding: 0.5rem 0.58rem;
+  font-size: 0.8rem;
+  color: #2e4f5d;
+  line-height: 1.35;
+}
+
 #map {
   min-height: clamp(430px, 62vh, 760px);
   border-radius: var(--radius-xl);
@@ -830,7 +929,7 @@ body {
   bottom: calc(4.7rem + env(safe-area-inset-bottom));
   width: min(520px, calc(100% - 2.4rem));
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 0.4rem;
   background: #f8fcff;
   border: 1px solid #c8d8e1;
@@ -951,6 +1050,20 @@ button:disabled:hover {
   .topbar {
     border-radius: 18px;
     padding: 0.8rem 0.86rem;
+  }
+
+  .community-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .community-hub {
+    border-radius: 18px;
+    padding: 0.68rem;
+  }
+
+  .community-card {
+    border-radius: 14px;
+    padding: 0.62rem;
   }
 
   .controls {
