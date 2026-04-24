@@ -120,6 +120,7 @@ const retryButton = document.getElementById("retry-btn");
 const closeButton = document.querySelector(".close-btn");
 const layoutElement = document.querySelector(".layout");
 let searchDebounceId = null;
+let mapRefreshTimers = [];
 
 function getViewFromHash() {
   const hash = String(window.location.hash || "").replace(/^#\/?/, "");
@@ -609,6 +610,36 @@ function focusVisiblePlacesOnMap() {
     return;
   }
   map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+}
+
+function clearScheduledMapRefresh() {
+  mapRefreshTimers.forEach((timerId) => window.clearTimeout(timerId));
+  mapRefreshTimers = [];
+}
+
+function scheduleMapRefresh() {
+  clearScheduledMapRefresh();
+  const refreshSteps = [0, 120, 320, 650];
+  refreshSteps.forEach((delay) => {
+    const timerId = window.setTimeout(() => {
+      if (state.currentView !== "map" || mapStage?.hidden) {
+        return;
+      }
+      map.invalidateSize(true);
+      if (map.dragging && !map.dragging.enabled()) {
+        map.dragging.enable();
+      }
+      map.eachLayer((layer) => {
+        if (layer instanceof L.TileLayer) {
+          layer.redraw();
+        }
+      });
+      if (delay === 0 && !state.userLocation) {
+        map.setView(INNSBRUCK_CENTER, 12);
+      }
+    }, delay);
+    mapRefreshTimers.push(timerId);
+  });
 }
 
 function loadSavedState() {
@@ -1493,15 +1524,9 @@ function setView(view, { syncHash = true } = {}) {
   }
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (view === "map") {
-    window.setTimeout(() => {
-      map.invalidateSize();
-      if (!state.userLocation) {
-        map.setView(INNSBRUCK_CENTER, 12);
-      }
-    }, 80);
-    window.setTimeout(() => {
-      map.invalidateSize();
-    }, 220);
+    scheduleMapRefresh();
+  } else {
+    clearScheduledMapRefresh();
   }
 }
 
