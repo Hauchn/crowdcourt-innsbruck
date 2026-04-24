@@ -163,23 +163,15 @@ body {
   box-shadow: 0 8px 18px #11182726;
 }
 
-.layout.view-favorites .map-stage,
 .layout.view-favorites #home-hub {
   display: none !important;
 }
 
-.layout.view-community .map-stage,
 .layout.view-community #home-hub,
-.layout.view-community .content,
 .layout.view-community .controls,
 .layout.view-community .search-row,
 .layout.view-community #selected-spot-card,
 .layout.view-community #onboarding-banner {
-  display: none !important;
-}
-
-.layout.view-home .map-stage,
-.layout.view-home .content {
   display: none !important;
 }
 
