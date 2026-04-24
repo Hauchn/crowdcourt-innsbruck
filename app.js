@@ -1498,7 +1498,7 @@ function setView(view, { syncHash = true } = {}) {
     button.classList.toggle("active", button.dataset.view === view);
   });
   if (layoutElement) {
-    layoutElement.classList.remove("view-home", "view-map", "view-favorites");
+    layoutElement.classList.remove("view-home", "view-map", "view-favorites", "view-community");
     layoutElement.classList.add(`view-${view}`);
   }
   if (homeHub) {
